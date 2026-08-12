@@ -11,7 +11,7 @@ jobs:
       - name: Sync assets
         env:
           GH_TOKEN: ${{ secrets.DEST_REPO_PAT }}
-          DEST_REPO: owner/destination-repo   # 🔴 isko badalna hoga
+          DEST_REPO: 16c105b4081fc7613694165378f04d39/backup  # 🔴 isko badalna hoga
         run: |
           TAG="${{ github.event.release.tag_name }}"
           SOURCE="${{ github.repository }}"
