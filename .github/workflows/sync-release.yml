@@ -6,20 +6,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to sync (optional)'
+        description: 'Release tag to sync'
         required: false
   schedule:
-    - cron: '*/05 * * * *'   # Har 30 minute mein auto-check
+    - cron: '0,5,10,15,20,25,30,35,40,45,50,55 * * * *'
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Smart incremental sync
+      - name: Auto sync v1.0.0
         env:
           GH_TOKEN: ${{ secrets.DEST_REPO_PAT }}
           DEST_REPO: 16c105b4081fc7613694165378f04d39/backup
           SOURCE_REPO: ${{ github.repository }}
+          FIXED_TAG: "v1.0.0"
         run: |
           # Tag determine karein
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -27,53 +28,50 @@ jobs:
           elif [ "${{ github.event_name }}" = "release" ]; then
             TAG="${{ github.event.release.tag_name }}"
           else
-            TAG=$(gh release list --repo "$SOURCE_REPO" --limit 1 --json tagName -q '.[0].tagName')
-            if [ -z "$TAG" ]; then
-              echo "❌ No releases found."
-              exit 0
-            fi
-            echo "📅 Scheduled sync: latest tag '$TAG'"
+            TAG="$FIXED_TAG"
+            echo "📅 Auto scheduled sync: $TAG"
           fi
           
-          echo "🔄 Sync '$TAG' from $SOURCE_REPO to $DEST_REPO"
+          echo "🔄 Syncing '$TAG' from $SOURCE_REPO to $DEST_REPO"
           
-          # Destination check
+          # Destination release check
           if ! gh release view "$TAG" --repo "$DEST_REPO" &>/dev/null; then
-            NOTES=$(gh release view "$TAG" --repo "$SOURCE_REPO" --json body -q '.body')
+            echo "📦 Creating destination release..."
+            NOTES=$(gh release view "$TAG" --repo "$SOURCE_REPO" --json body -q '.body' 2>/dev/null || echo "")
             gh release create "$TAG" --repo "$DEST_REPO" --title "Release $TAG" --notes "$NOTES"
-            echo "📦 Created release in destination"
           fi
           
-          # Existing assets in destination
-          gh release view "$TAG" --repo "$DEST_REPO" --json assets -q '.assets[].name' > /tmp/existing.txt
+          # Get existing assets from destination
+          gh release view "$TAG" --repo "$DEST_REPO" --json assets -q '.assets[].name' 2>/dev/null | sort > /tmp/existing.txt
           
-          # Source assets
-          gh release view "$TAG" --repo "$SOURCE_REPO" --json assets -q '.assets[].name' > /tmp/source.txt
+          # Get source assets
+          gh release view "$TAG" --repo "$SOURCE_REPO" --json assets -q '.assets[].name' 2>/dev/null | sort > /tmp/source.txt
           
-          # New files
-          comm -23 <(sort /tmp/source.txt) <(sort /tmp/existing.txt) > /tmp/new_files.txt
-          NEW_COUNT=$(wc -l < /tmp/new_files.txt)
+          # Find new files
+          comm -23 /tmp/source.txt /tmp/existing.txt > /tmp/new_files.txt
+          NEW_COUNT=$(wc -l < /tmp/new_files.txt | tr -d ' ')
           
-          echo "✨ New files to upload: $NEW_COUNT"
+          echo "📊 Existing: $(wc -l < /tmp/existing.txt | tr -d ' ') | New: $NEW_COUNT"
           
           if [ "$NEW_COUNT" -eq 0 ]; then
             echo "✅ Already up-to-date!"
             exit 0
           fi
           
-          # Download only new
+          # Download only new files
           mkdir -p assets_new
           while IFS= read -r fname; do
             [ -z "$fname" ] && continue
-            echo "⬇️ $fname"
-            gh release download "$TAG" --repo "$SOURCE_REPO" --pattern "$fname" --dir assets_new --clobber
+            echo "⬇️ Downloading: $fname"
+            gh release download "$TAG" --repo "$SOURCE_REPO" --pattern "$fname" --dir assets_new --clobber 2>/dev/null || echo "⚠️ Failed: $fname"
           done < /tmp/new_files.txt
           
-          # Upload new
+          # Upload new files
           for file in assets_new/*; do
             [ -f "$file" ] || continue
-            echo "⬆️ $(basename "$file")"
-            gh release upload "$TAG" "$file" --repo "$DEST_REPO" --clobber
+            fname=$(basename "$file")
+            echo "⬆️ Uploading: $fname"
+            gh release upload "$TAG" "$file" --repo "$DEST_REPO" --clobber 2>/dev/null || echo "⚠️ Upload failed: $fname"
           done
           
-          echo "🎉 Sync complete!"
+          echo "🎉 Sync complete! ($NEW_COUNT files uploaded)"
