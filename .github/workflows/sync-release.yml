@@ -6,8 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to sync'
-        required: true
+        description: 'Release tag to sync (optional)'
+        required: false
+  schedule:
+    - cron: '*/05 * * * *'   # Har 30 minute mein auto-check
 
 jobs:
   sync:
@@ -16,67 +18,62 @@ jobs:
       - name: Smart incremental sync
         env:
           GH_TOKEN: ${{ secrets.DEST_REPO_PAT }}
-          DEST_REPO: 16c105b4081fc7613694165378f04d39/backup   # 🔴 APNA DESTINATION REPO
+          DEST_REPO: 16c105b4081fc7613694165378f04d39/backup
+          SOURCE_REPO: ${{ github.repository }}
         run: |
           # Tag determine karein
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ github.event.inputs.tag }}"
-          else
+          elif [ "${{ github.event_name }}" = "release" ]; then
             TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG=$(gh release list --repo "$SOURCE_REPO" --limit 1 --json tagName -q '.[0].tagName')
+            if [ -z "$TAG" ]; then
+              echo "❌ No releases found."
+              exit 0
+            fi
+            echo "📅 Scheduled sync: latest tag '$TAG'"
           fi
-          SOURCE="${{ github.repository }}"
           
-          echo "🔄 Smart sync: '$TAG' from $SOURCE to $DEST_REPO"
+          echo "🔄 Sync '$TAG' from $SOURCE_REPO to $DEST_REPO"
           
-          # 1. Destination release check / create
-          echo "📋 Checking destination release..."
+          # Destination check
           if ! gh release view "$TAG" --repo "$DEST_REPO" &>/dev/null; then
-            echo "📦 Creating new release in destination..."
-            NOTES=$(gh release view "$TAG" --repo "$SOURCE" --json body -q '.body')
+            NOTES=$(gh release view "$TAG" --repo "$SOURCE_REPO" --json body -q '.body')
             gh release create "$TAG" --repo "$DEST_REPO" --title "Release $TAG" --notes "$NOTES"
+            echo "📦 Created release in destination"
           fi
           
-          # 2. Destination ke existing asset names JSON se lo (fast)
-          echo "🔍 Fetching existing asset names from destination..."
+          # Existing assets in destination
           gh release view "$TAG" --repo "$DEST_REPO" --json assets -q '.assets[].name' > /tmp/existing.txt
-          echo "   Found $(wc -l < /tmp/existing.txt) existing assets"
           
-          # 3. Source ke saare asset names bina download kiye lo
-          echo "🔍 Fetching source asset names..."
-          gh release view "$TAG" --repo "$SOURCE" --json assets -q '.assets[].name' > /tmp/source.txt
+          # Source assets
+          gh release view "$TAG" --repo "$SOURCE_REPO" --json assets -q '.assets[].name' > /tmp/source.txt
           
-          # 4. Nayi files ki list banao (jo destination mein nahi)
-          echo "⚖️ Comparing and finding new files..."
+          # New files
           comm -23 <(sort /tmp/source.txt) <(sort /tmp/existing.txt) > /tmp/new_files.txt
-          
           NEW_COUNT=$(wc -l < /tmp/new_files.txt)
-          echo "   ✨ New files to upload: $NEW_COUNT"
+          
+          echo "✨ New files to upload: $NEW_COUNT"
           
           if [ "$NEW_COUNT" -eq 0 ]; then
-            echo "✅ Destination already up-to-date! Kuch nahi karna."
+            echo "✅ Already up-to-date!"
             exit 0
           fi
           
-          # 5. Sirf nayi files download karo
-          echo "⬇️ Downloading only new files..."
+          # Download only new
           mkdir -p assets_new
           while IFS= read -r fname; do
             [ -z "$fname" ] && continue
-            echo "   ⬇️ $fname"
-            gh release download "$TAG" --repo "$SOURCE" --pattern "$fname" --dir assets_new --clobber
+            echo "⬇️ $fname"
+            gh release download "$TAG" --repo "$SOURCE_REPO" --pattern "$fname" --dir assets_new --clobber
           done < /tmp/new_files.txt
           
-          # 6. Nayi files upload karo
-          echo "⬆️ Uploading new files to destination..."
-          UPLOADED=0
+          # Upload new
           for file in assets_new/*; do
             [ -f "$file" ] || continue
-            fname=$(basename "$file")
-            echo "   ⬆️ $fname"
+            echo "⬆️ $(basename "$file")"
             gh release upload "$TAG" "$file" --repo "$DEST_REPO" --clobber
-            UPLOADED=$((UPLOADED + 1))
           done
           
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📊 Uploaded: $UPLOADED new file(s)"
-          echo "🎉 Smart sync complete!"
+          echo "🎉 Sync complete!"
