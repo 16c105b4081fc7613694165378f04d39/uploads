@@ -13,10 +13,10 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Incremental sync assets
+      - name: Smart incremental sync
         env:
           GH_TOKEN: ${{ secrets.DEST_REPO_PAT }}
-          DEST_REPO: 16c105b4081fc7613694165378f04d39/backup   # 🔴 APNA DESTINATION REPO LIKHEIN
+          DEST_REPO: 16c105b4081fc7613694165378f04d39/backup   # 🔴 APNA DESTINATION REPO
         run: |
           # Tag determine karein
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -26,45 +26,57 @@ jobs:
           fi
           SOURCE="${{ github.repository }}"
           
-          echo "🔄 Incremental sync: '$TAG' from $SOURCE to $DEST_REPO..."
+          echo "🔄 Smart sync: '$TAG' from $SOURCE to $DEST_REPO"
           
-          # 1. Destination ki existing assets ki list lo
-          echo "📋 Fetching existing assets in destination..."
-          if gh release view "$TAG" --repo "$DEST_REPO" &>/dev/null; then
-            gh release view "$TAG" --repo "$DEST_REPO" --json assets -q '.assets[].name' > /tmp/existing_assets.txt
-            echo "✅ Found $(wc -l < /tmp/existing_assets.txt) existing assets"
-          else
+          # 1. Destination release check / create
+          echo "📋 Checking destination release..."
+          if ! gh release view "$TAG" --repo "$DEST_REPO" &>/dev/null; then
             echo "📦 Creating new release in destination..."
             NOTES=$(gh release view "$TAG" --repo "$SOURCE" --json body -q '.body')
             gh release create "$TAG" --repo "$DEST_REPO" --title "Release $TAG" --notes "$NOTES"
-            touch /tmp/existing_assets.txt  # empty file
           fi
           
-          # 2. Source se saare assets download karo (temporary)
-          echo "⬇️ Downloading source assets..."
-          mkdir -p assets
-          gh release download "$TAG" --repo "$SOURCE" --dir assets
+          # 2. Destination ke existing asset names JSON se lo (fast)
+          echo "🔍 Fetching existing asset names from destination..."
+          gh release view "$TAG" --repo "$DEST_REPO" --json assets -q '.assets[].name' > /tmp/existing.txt
+          echo "   Found $(wc -l < /tmp/existing.txt) existing assets"
           
-          # 3. Sirf naye aur changed files upload karo
-          echo "🔍 Checking for new/updated files..."
+          # 3. Source ke saare asset names bina download kiye lo
+          echo "🔍 Fetching source asset names..."
+          gh release view "$TAG" --repo "$SOURCE" --json assets -q '.assets[].name' > /tmp/source.txt
+          
+          # 4. Nayi files ki list banao (jo destination mein nahi)
+          echo "⚖️ Comparing and finding new files..."
+          comm -23 <(sort /tmp/source.txt) <(sort /tmp/existing.txt) > /tmp/new_files.txt
+          
+          NEW_COUNT=$(wc -l < /tmp/new_files.txt)
+          echo "   ✨ New files to upload: $NEW_COUNT"
+          
+          if [ "$NEW_COUNT" -eq 0 ]; then
+            echo "✅ Destination already up-to-date! Kuch nahi karna."
+            exit 0
+          fi
+          
+          # 5. Sirf nayi files download karo
+          echo "⬇️ Downloading only new files..."
+          mkdir -p assets_new
+          while IFS= read -r fname; do
+            [ -z "$fname" ] && continue
+            echo "   ⬇️ $fname"
+            gh release download "$TAG" --repo "$SOURCE" --pattern "$fname" --dir assets_new --clobber
+          done < /tmp/new_files.txt
+          
+          # 6. Nayi files upload karo
+          echo "⬆️ Uploading new files to destination..."
           UPLOADED=0
-          SKIPPED=0
-          
-          for file in assets/*; do
+          for file in assets_new/*; do
+            [ -f "$file" ] || continue
             fname=$(basename "$file")
-            if grep -Fxq "$fname" /tmp/existing_assets.txt; then
-              echo "⏭️ Skipping (already exists): $fname"
-              SKIPPED=$((SKIPPED + 1))
-            else
-              echo "⬆️ Uploading new file: $fname"
-              gh release upload "$TAG" "$file" --repo "$DEST_REPO" --clobber
-              UPLOADED=$((UPLOADED + 1))
-            fi
+            echo "   ⬆️ $fname"
+            gh release upload "$TAG" "$file" --repo "$DEST_REPO" --clobber
+            UPLOADED=$((UPLOADED + 1))
           done
           
           echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📊 Sync Summary:"
-          echo "   ✅ Uploaded: $UPLOADED new file(s)"
-          echo "   ⏭️ Skipped: $SKIPPED existing file(s)"
-          echo "   💡 Tip: Renamed files appear as new. Old files stay until manually deleted."
-          echo "🎉 Incremental sync complete!"
+          echo "📊 Uploaded: $UPLOADED new file(s)"
+          echo "🎉 Smart sync complete!"
