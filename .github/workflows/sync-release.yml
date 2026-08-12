@@ -1,0 +1,44 @@
+name: Sync Release Assets to Destination
+
+on:
+  release:
+    types: [published, edited]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync assets
+        env:
+          GH_TOKEN: ${{ secrets.DEST_REPO_PAT }}
+          DEST_REPO: owner/destination-repo   # 🔴 isko badalna hoga
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          SOURCE="${{ github.repository }}"
+          
+          echo "🔄 Syncing '$TAG' from $SOURCE to $DEST_REPO..."
+          
+          # 1. Download assets from source release
+          mkdir -p assets
+          gh release download "$TAG" --repo "$SOURCE" --dir assets
+          
+          # 2. Check if release exists in destination, if not create it
+          if gh release view "$TAG" --repo "$DEST_REPO" &>/dev/null; then
+            echo "✅ Release '$TAG' already exists in destination."
+          else
+            echo "📦 Creating release '$TAG' in destination..."
+            NOTES=$(gh release view "$TAG" --repo "$SOURCE" --json body -q '.body')
+            gh release create "$TAG" --repo "$DEST_REPO" --title "Release $TAG" --notes "$NOTES"
+          fi
+          
+          # 3. Upload each asset (overwrites if same name)
+          if [ -n "$(ls -A assets/ 2>/dev/null)" ]; then
+            for file in assets/*; do
+              echo "⬆️ Uploading $(basename "$file")..."
+              gh release upload "$TAG" "$file" --repo "$DEST_REPO" --clobber
+            done
+          else
+            echo "ℹ️ No assets found in this release."
+          fi
+          
+          echo "🎉 Sync complete!"
